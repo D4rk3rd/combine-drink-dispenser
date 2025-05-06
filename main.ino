@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <ESP32Servo.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #define FASTLED_ALLOW_INTERRUPTS 0
@@ -13,6 +14,9 @@
 
 #define POUR_PIN 6
 
+#define PUMP_IN1 12
+#define PUMP_IN2 13
+
 #define LED_PIN 18            // GPIO2 (D4)
 #define NUM_LEDS 5
 #define LED_TYPE WS2812
@@ -26,6 +30,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 CRGB leds[NUM_LEDS];
 
+Servo arm;
+
+int pourPositions[] = {500, 1000, 1500, 2000, 2500};
+
+const int servoPin = 17;
 int tempValue = 0;
 int selGlassCount = 5;
 int selVolume = 8;
@@ -42,7 +51,6 @@ unsigned long lastOLEDUpdate = 0;
 const unsigned long OLED_INTERVAL = 200;
 int menuIndex = 0;  // 0 = Pour, 1 = Volume, 2 = Glass Count, 3 = Tap
 const int maxVolume = 8; // 0.0cl to 4.0cl in 0.5cl steps (0 to 8)
-bool pourTriggered = false;
 
 // 'cup_empty', 14x14px
 const unsigned char epd_bitmap_cup_empty [] PROGMEM = {
@@ -74,6 +82,10 @@ void setup() {
   pinMode(SW_PIN, INPUT_PULLUP);
   pinMode(POUR_PIN, INPUT_PULLUP);
 
+  digitalWrite(PUMP_IN1, LOW);
+  digitalWrite(PUMP_IN2, LOW);
+
+  arm.attach(servoPin, 500, 2500);
 
   Serial.begin(115200);
   // Initialize OLED
@@ -119,6 +131,7 @@ void loop() {
       break;
   }
   updateOLED();
+
 }
 
 void drawMenuOptions(int& selected) {
@@ -171,20 +184,16 @@ void handleButton() {
   bool currentSW = digitalRead(SW_PIN);
   if (lastSW == HIGH && currentSW == LOW) {
     if (menuIndex == 1) {
-      selVolume = tempValue;
       // Confirm volume selection
       Serial.print("Selected Volume: ");
       Serial.print(selVolume * 0.5);
       Serial.println(" cl");
     } else if (menuIndex == 2) {
-      selGlassCount = tempValue;
       // Confirm glass count selection
       Serial.print("Selected Glass Count: ");
       Serial.println(selGlassCount);
     } else if (menuIndex == 0) {
-      // "Pour" action (this can trigger an event)
-      pourTriggered = true;
-      Serial.println("Pouring...");
+      Serial.println("Pour menu");
       // Optionally trigger a pour animation or solenoid here
     }
 
@@ -201,28 +210,28 @@ void handleButton() {
 }
 
 void handlePourButton() {
-  bool reading = digitalRead(POUR_PIN);
-  unsigned long currentTime = millis();
+  static bool lastStableState = HIGH;
+  static unsigned long lastChangeTime = 0;
 
-  if (reading != lastPourState) {
-    lastDebounceTime = currentTime;
-  }
+  bool currentReading = digitalRead(POUR_PIN);
+  unsigned long now = millis();
 
-  if ((currentTime - lastDebounceTime) > debounceDelay) {
-    // Only trigger if button is *pressed* (LOW with INPUT_PULLUP)
-    if (reading == LOW && lastPourState == HIGH) {
+  if (currentReading != lastStableState && (now - lastChangeTime) > debounceDelay) {
+    lastChangeTime = now;
+    lastStableState = currentReading;
+
+    if (currentReading == LOW) {
+      Serial.println("Pour button press detected");
       onPourButtonPressed();
     }
   }
-
-  lastPourState = reading;
 }
-
 
 void displayVolumeSelector() {
   float clAmount = tempValue * 0.5;
   int frameHeight = SCREEN_HEIGHT - 2;
   int barHeight = map(tempValue, 0, maxVolume, 0, frameHeight);
+  selVolume = tempValue;
 
   display.clearDisplay();
   drawMenuOptions(menuIndex);
@@ -255,6 +264,7 @@ void displayGlassSelector() {
   display.setCursor(30, 0);
   display.print("Glass count: ");
   display.println(tempValue);
+  selGlassCount = tempValue;
 
   // Draw a simple box to represent the glass
   int boxWidth = 60;
@@ -280,9 +290,24 @@ void displayTapMenu() {
 }
 
 void onPourButtonPressed() {
-  Serial.println("Pour button on GPIO 6 pressed!");
-  displayTapMenu();
+  Serial.println("Volume: " + String(selVolume));
+  Serial.println("GlassCount: " + String(selGlassCount));
+
+  //digitalWrite(PUMP_IN1, HIGH);
+  //digitalWrite(PUMP_IN2, LOW);
+  //delay(500);
+  //digitalWrite(PUMP_IN1, LOW);
+  //digitalWrite(PUMP_IN2, LOW);
+  int steps = min(selGlassCount, (int)(sizeof(pourPositions) / sizeof(pourPositions[0])));
+  for (int i = 0; i < steps; i++) {
+    arm.writeMicroseconds(pourPositions[i]);
+    delay(1000);
+  }
+
+  arm.writeMicroseconds(1500); // Reset to center
 }
+
+
 
 
 void updateGlassLEDBar() {
