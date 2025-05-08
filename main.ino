@@ -13,6 +13,7 @@
 #define SW_PIN 5
 
 #define POUR_PIN 6
+#define FLUSH_PIN 7
 
 #define PUMP_IN1 12
 #define PUMP_IN2 13
@@ -32,12 +33,23 @@ CRGB leds[NUM_LEDS];
 
 Servo arm;
 
-int pourPositions[] = {500, 1000, 1500, 2000, 2500};
+// pourpositions 2D array: because of the elasticity of the silicone tube used to move the arm the positions are not accurate, since the servo needs to move more or less depending on if its the first or not to move
+// this isnt an elegant solution, but i didnt want to calculate how much more the first needs to move depending on the selGlassCount ¯_(ツ)_/¯
+const int pourPositionsSet[5][5] = {
+  {2200, 0, 0, 0, 0},              // 1 glass
+  {2150, 1650, 0, 0, 0},           // 2 glasses
+  {2180, 1730, 1150, 0, 0},         // 3 glasses
+  {2180, 1800, 1300, 850, 0},      // 4 glasses
+  {2200, 1860, 1420, 1000, 500}     // 5 glasses
+};
+
+int pourAmounts[] = {0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800};
+
 
 const int servoPin = 17;
 int tempValue = 0;
 int selGlassCount = 5;
-int selVolume = 8;
+int selVolume = 9;
 int lastStateCLK = HIGH;
 bool lastSW = HIGH;
 int hue = 0;
@@ -50,7 +62,7 @@ const unsigned long debounceDelay = 50;
 unsigned long lastOLEDUpdate = 0;
 const unsigned long OLED_INTERVAL = 200;
 int menuIndex = 0;  // 0 = Pour, 1 = Volume, 2 = Glass Count, 3 = Tap
-const int maxVolume = 8; // 0.0cl to 4.0cl in 0.5cl steps (0 to 8)
+const int maxVolume = 9; // 0.0cl to 4.5cl in 0.5cl steps (0 to 9)
 
 // 'cup_empty', 14x14px
 const unsigned char epd_bitmap_cup_empty [] PROGMEM = {
@@ -81,6 +93,9 @@ void setup() {
   pinMode(DT_PIN, INPUT);
   pinMode(SW_PIN, INPUT_PULLUP);
   pinMode(POUR_PIN, INPUT_PULLUP);
+  pinMode(FLUSH_PIN, INPUT_PULLUP);
+  pinMode(PUMP_IN1, OUTPUT);
+  pinMode(PUMP_IN2, OUTPUT);
 
   digitalWrite(PUMP_IN1, LOW);
   digitalWrite(PUMP_IN2, LOW);
@@ -113,6 +128,7 @@ void loop() {
   handleEncoder();
   handleButton();
   handlePourButton();
+  handleFlush();
 
   // Display different menus based on the menuIndex
   switch(menuIndex) {
@@ -169,7 +185,7 @@ void handleEncoder() {
 
     // Clamp values based on menu
     if (menuIndex == 1) {
-      tempValue = constrain(tempValue, 0, maxVolume);  // Volume 0.0cl to 4.0cl
+      tempValue = constrain(tempValue, 0, maxVolume);  // Volume 0.0cl to 4.5cl
     } else if (menuIndex == 2) {
       tempValue = constrain(tempValue, 1, 5);  // Glass count from 1 to 5
     }
@@ -227,6 +243,24 @@ void handlePourButton() {
   }
 }
 
+void handleFlush() {
+  static bool wasFlushing = false;
+
+  bool isFlushing = digitalRead(FLUSH_PIN) == LOW;
+
+  if (isFlushing && !wasFlushing) {
+    Serial.println("Button just pressed: start flushing");
+    digitalWrite(PUMP_IN1, LOW);
+    digitalWrite(PUMP_IN2, HIGH); // Run motor backward
+  } else if (!isFlushing && wasFlushing) {
+    Serial.println("Button just released: stop motor");
+    digitalWrite(PUMP_IN1, LOW);
+    digitalWrite(PUMP_IN2, LOW);
+  }
+
+  wasFlushing = isFlushing; // Update the state
+}
+
 void displayVolumeSelector() {
   float clAmount = tempValue * 0.5;
   int frameHeight = SCREEN_HEIGHT - 2;
@@ -280,32 +314,82 @@ void displayPourMenu() {
   // Display "Pour" button
   display.setCursor(25, 0);
   display.setTextSize(2);
-  display.println("P O U R");
+  display.println("WIP");
   display.setTextSize(1);
 }
 
 void displayTapMenu() {
   display.clearDisplay();
   drawMenuOptions(menuIndex);
+
+  display.setCursor(30, 0);
+  display.setTextSize(1);
+  display.println("Tap Adjust Mode");
+
+  // Inline rotary encoder direction handling
+  static int lastTempValue = tempValue;
+
+  if (tempValue != lastTempValue) {
+    int direction = tempValue > lastTempValue ? 1 : -1;
+    lastTempValue = tempValue;
+
+    Serial.println(direction == 1 ? "Pump Forward Step" : "Pump Backward Step");
+
+    if (direction == 1) {
+      digitalWrite(PUMP_IN1, HIGH);
+      digitalWrite(PUMP_IN2, LOW);
+      Serial.println("forward");
+    } else {
+      digitalWrite(PUMP_IN1, LOW);
+      digitalWrite(PUMP_IN2, HIGH);
+      Serial.println("backward");
+
+    }
+
+    delay(100);  // Small pump nudge
+    digitalWrite(PUMP_IN1, LOW);
+    digitalWrite(PUMP_IN2, LOW);
+  }
 }
+
 
 void onPourButtonPressed() {
   Serial.println("Volume: " + String(selVolume));
   Serial.println("GlassCount: " + String(selGlassCount));
 
-  //digitalWrite(PUMP_IN1, HIGH);
-  //digitalWrite(PUMP_IN2, LOW);
-  //delay(500);
-  //digitalWrite(PUMP_IN1, LOW);
-  //digitalWrite(PUMP_IN2, LOW);
-  int steps = min(selGlassCount, (int)(sizeof(pourPositions) / sizeof(pourPositions[0])));
-  for (int i = 0; i < steps; i++) {
-    arm.writeMicroseconds(pourPositions[i]);
+  const int ledSteps = 50; // number of color steps in transition
+  int steps = constrain(selGlassCount, 1, NUM_LEDS);  // Already done
+  for (int i = steps - 1; i >= 0; i--) {
+    int position = pourPositionsSet[selGlassCount - 1][i];
+    arm.writeMicroseconds(position);
     delay(1000);
+    Serial.println(pourAmounts[selVolume]);
+    Serial.println("Servo pos: " + String(position));
+
+    // Start pump
+    digitalWrite(PUMP_IN1, HIGH);
+    digitalWrite(PUMP_IN2, LOW);
+
+    // LED transition from red to green
+    for (int j = 0; j <= ledSteps; j++) {
+      uint8_t r = map(ledSteps - j, 0, ledSteps, 0, 255);
+      uint8_t g = map(j, 0, ledSteps, 0, 255);
+      leds[i] = CRGB(r, g, 0);
+      FastLED.show();
+      delay(pourAmounts[selVolume] / ledSteps);
+    }
+
+    // Stop pump
+    digitalWrite(PUMP_IN1, LOW);
+    digitalWrite(PUMP_IN2, LOW);
+    delay(500); // pause between pours
   }
 
-  arm.writeMicroseconds(1500); // Reset to center
+  arm.writeMicroseconds(2500);
+  delay(500);
+  updateGlassLEDBar();
 }
+
 
 
 
@@ -313,8 +397,8 @@ void onPourButtonPressed() {
 void updateGlassLEDBar() {
   fill_solid(leds, NUM_LEDS, CRGB::Black);  // Clear all LEDs
 
-  // Light up tempValue LEDs for real-time feedback while selecting
-  int activeLEDs = constrain(tempValue, 1, NUM_LEDS);
+  // Light up selGlassCount LEDs for real-time feedback while selecting
+  int activeLEDs = constrain(selGlassCount, 1, NUM_LEDS);
 
   for (int i = 0; i < activeLEDs; i++) {
     leds[i] = CRGB::Red;
